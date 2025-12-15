@@ -1,0 +1,199 @@
+#define F_CPU 8000000UL
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+#include <string.h>
+
+/* ---------------- LCD ---------------- */
+#define RS PB2
+#define EN PB3
+
+/* ---------------- OUTPUTS ---------------- */
+#define RELAY  PB0
+#define BUZZER PB1
+
+/* ---------------- TAMPER ---------------- */
+#define TAMPER PD2   // INT0
+
+/* ---------------- PIN ---------------- */
+#define PIN_LEN 4
+char correct_pin[PIN_LEN+1] = "1234";
+char entered_pin[PIN_LEN+1];
+
+/* ---------------- LCD FUNCTIONS ---------------- */
+void lcd_cmd(unsigned char cmd)
+{
+	PORTA = cmd;
+	PORTB &= ~(1<<RS);
+	PORTB |=  (1<<EN);
+	_delay_ms(2);
+	PORTB &= ~(1<<EN);
+}
+
+void lcd_data(unsigned char data)
+{
+	PORTA = data;
+	PORTB |=  (1<<RS);
+	PORTB |=  (1<<EN);
+	_delay_ms(2);
+	PORTB &= ~(1<<EN);
+}
+
+void lcd_print(char *str)
+{
+	while(*str)
+	lcd_data(*str++);
+}
+
+void lcd_init()
+{
+	DDRA = 0xFF;
+	DDRB |= (1<<RS)|(1<<EN);
+	_delay_ms(50);
+
+	lcd_cmd(0x38);   // 8-bit, 2-line
+	lcd_cmd(0x0C);   // Display ON
+	lcd_cmd(0x01);   // Clear
+}
+
+/* ---------------- KEYPAD (4x3 on PORTC) ---------------- */
+char keypad_scan()
+{
+	const char keymap[4][3] = {
+		{'1','2','3'},
+		{'4','5','6'},
+		{'7','8','9'},
+		{'*','0','#'}
+	};
+
+	DDRC = 0x0F;      // PC0–PC3 rows output
+	PORTC = 0xF0;     // PC4–PC6 columns input pull-up
+
+	for(uint8_t r=0; r<4; r++)
+	{
+		PORTC = ~(1<<r);
+		_delay_ms(5);
+
+		for(uint8_t c=0; c<3; c++)
+		{
+			if(!(PINC & (1<<(c+4))))
+			{
+				while(!(PINC & (1<<(c+4))));
+				return keymap[r][c];
+			}
+		}
+	}
+	return 0;
+}
+
+void get_pin(char *buf)
+{
+	uint8_t i=0;
+	while(i < PIN_LEN)
+	{
+		char k = keypad_scan();
+		if(k)
+		{
+			buf[i++] = k;
+			lcd_data('*');
+		}
+	}
+	buf[PIN_LEN] = '\0';
+}
+
+/* ---------------- UART (Virtual Terminal) ---------------- */
+void uart_init()
+{
+	UBRRL = 51;   // 9600 baud @ 8MHz
+	UCSRB = (1<<RXEN);
+	UCSRC = (1<<URSEL)|(1<<UCSZ1)|(1<<UCSZ0);
+}
+
+char uart_rx()
+{
+	while(!(UCSRA & (1<<RXC)));
+	return UDR;
+}
+
+/* ---------------- TAMPER ISR ---------------- */
+ISR(INT0_vect)
+{
+	PORTB &= ~(1<<RELAY);
+	PORTB |=  (1<<BUZZER);
+
+	lcd_cmd(0x01);
+	lcd_print("TAMPER ALERT");
+
+	while(1);   // system locked
+}
+
+/* ---------------- MAIN ---------------- */
+int main(void)
+{
+	DDRB |= (1<<RELAY)|(1<<BUZZER);
+
+	DDRD &= ~(1<<TAMPER);
+	PORTD |= (1<<TAMPER);   // pull-up
+
+	MCUCR |= (1<<ISC01);    // Falling edge
+	GICR  |= (1<<INT0);
+	sei();
+
+	lcd_init();
+	uart_init();
+
+	lcd_print("Scan RFID");
+
+	while(1)
+	{
+		char r = uart_rx();   // any char from Virtual Terminal
+		if(r)
+		{
+			lcd_cmd(0x01);
+			lcd_print("Enter PIN:");
+			get_pin(entered_pin);
+
+			if(strcmp(entered_pin, correct_pin) == 0)
+			{
+				lcd_cmd(0x01);
+				lcd_print("ACCESS OK");
+
+				PORTB |= (1<<RELAY);
+				_delay_ms(3000);
+				PORTB &= ~(1<<RELAY);
+			}
+			else
+			{
+				lcd_cmd(0x01);
+				lcd_print("WRONG PIN");
+
+				PORTB |= (1<<BUZZER);
+				_delay_ms(1000);
+				PORTB &= ~(1<<BUZZER);
+
+				lcd_cmd(0x01);
+				lcd_print("Enter PIN:");
+				get_pin(entered_pin);
+
+				if(strcmp(entered_pin, correct_pin) == 0)
+				{
+					lcd_cmd(0x01);
+					lcd_print("ACCESS OK");
+					PORTB |= (1<<RELAY);
+					_delay_ms(3000);
+					PORTB &= ~(1<<RELAY);
+				}
+				else
+				{
+					lcd_cmd(0x01);
+					lcd_print("ACCESS DENIED");
+					_delay_ms(1500);
+				}
+			}
+
+			lcd_cmd(0x01);
+			lcd_print("Scan RFID");
+		}
+	}
+}
